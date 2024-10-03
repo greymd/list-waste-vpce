@@ -6,8 +6,8 @@ def debug(msg):
     if DEBUG:
         print(f"[debug] {msg}", flush=True, file=sys.stderr)
 
-def result(msg):
-    print(f"\033[91m{msg}\033[0m", flush=True, file=sys.stdout)
+def result(vpc_id, az, endpoint_id, service_name):
+    print(f"\033[91m{vpc_id}\t{az}\t{endpoint_id}\t{service_name}\033[0m", flush=True, file=sys.stdout)
 
 def is_public_subnet(ec2_client, subnet_id):
     response = ec2_client.describe_route_tables(
@@ -52,7 +52,7 @@ def main(region):
             if f'{vpc_id}-{az}' in vpc_az_is_pub_memo:
                 debug(f"VPC Endpoint ID: {endpoint['VpcEndpointId']} is already checked for VPC ID: {vpc_id}, AZ: {az}")
                 if vpc_az_is_pub_memo[f'{vpc_id}-{az}']:
-                    result(f"vpce: {endpoint['VpcEndpointId']}, az: {az}, vpc: {vpc_id}, service: {endpoint['ServiceName']}")
+                    result(vpc_id, az, endpoint['VpcEndpointId'], endpoint['ServiceName'])
                 continue
             vpc_az_is_pub_memo[f'{vpc_id}-{az}'] = False
             subnets_response = ec2_client.describe_subnets(
@@ -73,7 +73,7 @@ def main(region):
                     vpc_az_is_pub_memo[f'{vpc_id}-{az}'] = True
 
             if vpc_az_is_pub_memo[f'{vpc_id}-{az}']:
-                result(f"vpce: {endpoint['VpcEndpointId']}, az: {az}, vpc: {vpc_id}, service: {endpoint['ServiceName']}")
+                result(vpc_id, az, endpoint['VpcEndpointId'], endpoint['ServiceName'])
 
 if __name__ == '__main__':
     region = 'ap-northeast-1'
