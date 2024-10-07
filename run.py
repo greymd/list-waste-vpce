@@ -7,9 +7,28 @@ def debug(msg):
         print(f"[debug] {msg}", flush=True, file=sys.stderr)
 
 def result(vpc_id, az, endpoint_id, service_name):
+    # TODO Check if the VPC Endpoint handles recently large traffic or not
     print(f"\033[91m{vpc_id}\t{az}\t{endpoint_id}\t{service_name}\033[0m", flush=True, file=sys.stdout)
 
+# Check if the subnet has any ENIs without public IP address
+def has_private_eni(ec2_client, subnet_id):
+    response = ec2_client.describe_network_interfaces(
+        Filters=[
+            {'Name': 'subnet-id', 'Values': [subnet_id]}
+        ]
+    )
+    for eni in response['NetworkInterfaces']:
+        if not eni.get('Association'):
+            debug(f"Private ENI -- Subnet ID: {subnet_id}, ENIs: {eni['NetworkInterfaceId']}")
+            return True
+            # continue
+        if not eni['Association'].get('PublicIp'):
+            debug(f"Private ENI -- Subnet ID: {subnet_id}, ENIs: {eni['NetworkInterfaceId']}")
+            return True
+    return False
+
 def is_public_subnet(ec2_client, subnet_id):
+    any_private_eni = has_private_eni(ec2_client, subnet_id)
     response = ec2_client.describe_route_tables(
         Filters=[
             {'Name': 'association.subnet-id', 'Values': [subnet_id]}
@@ -20,7 +39,7 @@ def is_public_subnet(ec2_client, subnet_id):
             if route.get('DestinationCidrBlock') == '0.0.0.0/0':
                 if 'GatewayId' in route and route['GatewayId'].startswith('igw-'):
                     debug(f"Subnet ID: {subnet_id} = PUBLIC")
-                    return True
+                    return (True and any_private_eni)
                 if 'NatGatewayId' in route:
                     debug(f"Subnet ID: {subnet_id} = PUBLIC")
                     return True
