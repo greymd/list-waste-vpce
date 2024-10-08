@@ -1,14 +1,42 @@
 import boto3
 import sys
+import datetime
+
+class SubnetType:
+    PUBLIC = 0
+    HALF_PUBLIC = 1
+    PRIVATE = 2
 
 DEBUG = False
 def debug(msg):
     if DEBUG:
         print(f"[debug] {msg}", flush=True, file=sys.stderr)
 
-def result(vpc_id, az, endpoint_id, service_name):
-    # TODO Check if the VPC Endpoint handles recently large traffic or not
-    print(f"\033[91m{vpc_id}\t{az}\t{endpoint_id}\t{service_name}\033[0m", flush=True, file=sys.stdout)
+def result(account_id, cw_client, vpc_id, az, endpoint_id, service_name, subnet_type):
+    if subnet_type == SubnetType.PRIVATE:
+        return
+    subnet_type_str = 'SAFE_TO_DELETE'
+    if subnet_type == SubnetType.HALF_PUBLIC:
+        subnet_type_str = 'CHECK_MANUALLY'
+    # Check total ByteProcessed metric in 30 days from CloudWatch
+    response = cw_client.get_metric_statistics(
+        Namespace='AWS/PrivateLinkEndpoints',
+        MetricName='BytesProcessed',
+        Dimensions=[
+            {'Name': 'VPC Id', 'Value': vpc_id},
+            {'Name': 'VPC Endpoint Id', 'Value': endpoint_id},
+            {'Name': 'Endpoint Type', 'Value': 'Interface'},
+            {'Name': 'Service Name', 'Value': service_name}
+        ],
+        Period=3600*24*30,
+        StartTime=(datetime.datetime.now() - datetime.timedelta(days=30)).isoformat(),
+        EndTime=datetime.datetime.now().isoformat(),
+        Statistics=['Sum']
+    )
+    total_bytes_processed = 0
+    for data_point in response['Datapoints']:
+        total_bytes_processed += data_point['Sum']
+    print(f"\033[91m{account_id}\t{vpc_id}\t{az}\t{subnet_type_str}\t{endpoint_id}\t{service_name}\t{total_bytes_processed}\033[0m", flush=True, file=sys.stdout)
 
 # Check if the subnet has any ENIs without public IP address
 def has_private_eni(ec2_client, subnet_id):
@@ -38,15 +66,21 @@ def is_public_subnet(ec2_client, subnet_id):
         for route in route_table['Routes']:
             if route.get('DestinationCidrBlock') == '0.0.0.0/0':
                 if 'GatewayId' in route and route['GatewayId'].startswith('igw-'):
-                    debug(f"Subnet ID: {subnet_id} = PUBLIC")
-                    return (True and any_private_eni)
+                    if any_private_eni:
+                        debug(f"Subnet ID: {subnet_id} = HALF_PUBLIC")
+                        return SubnetType.HALF_PUBLIC
+                    else:
+                        debug(f"Subnet ID: {subnet_id} = PUBLIC")
+                        return SubnetType.PUBLIC
                 if 'NatGatewayId' in route:
                     debug(f"Subnet ID: {subnet_id} = PUBLIC")
-                    return True
+                    return SubnetType.PUBLIC
     debug(f"Subnet ID: {subnet_id} = PRIVATE")
-    return False
+    return SubnetType.PRIVATE
 
 def main(region):
+    account_id = boto3.client('sts').get_caller_identity().get('Account')
+    cw_client = boto3.client('cloudwatch', region_name=region)
     ec2_client = boto3.client('ec2', region_name=region)
     response = ec2_client.describe_vpc_endpoints(
         Filters=[
@@ -70,10 +104,15 @@ def main(region):
         for az in eni_azs:
             if f'{vpc_id}-{az}' in vpc_az_is_pub_memo:
                 debug(f"VPC Endpoint ID: {endpoint['VpcEndpointId']} is already checked for VPC ID: {vpc_id}, AZ: {az}")
-                if vpc_az_is_pub_memo[f'{vpc_id}-{az}']:
-                    result(vpc_id, az, endpoint['VpcEndpointId'], endpoint['ServiceName'])
+                result(account_id,
+                       cw_client,
+                       vpc_id,
+                       az,
+                       endpoint['VpcEndpointId'],
+                       endpoint['ServiceName'],
+                       vpc_az_is_pub_memo[f'{vpc_id}-{az}'])
                 continue
-            vpc_az_is_pub_memo[f'{vpc_id}-{az}'] = False
+            vpc_az_is_pub_memo[f'{vpc_id}-{az}'] = SubnetType.PRIVATE
             subnets_response = ec2_client.describe_subnets(
                 Filters=[
                     {'Name': 'availability-zone', 'Values': [az]},
@@ -81,18 +120,27 @@ def main(region):
                 ]
             )
 
-            all_subnets_count = len(subnets_response['Subnets'])
-            public_subnets_count = 0
+            subnet_types = []
             for subnet in subnets_response['Subnets']:
-                debug(f"VPC ID: {vpc_id}, Subnet ID: {subnet['SubnetId']}, AZ: {az}, Endpoint ID: {endpoint['VpcEndpointId']}, Service Name: {endpoint['ServiceName']}")
-                if is_public_subnet(ec2_client, subnet['SubnetId']):
-                    public_subnets_count += 1
-                debug(f"Public Subnets Count: {public_subnets_count}, All Subnets Count: {all_subnets_count}")
-                if public_subnets_count == all_subnets_count:
-                    vpc_az_is_pub_memo[f'{vpc_id}-{az}'] = True
+                subnet_type = is_public_subnet(ec2_client, subnet['SubnetId'])
+                subnet_types.append(subnet_type)
 
-            if vpc_az_is_pub_memo[f'{vpc_id}-{az}']:
-                result(vpc_id, az, endpoint['VpcEndpointId'], endpoint['ServiceName'])
+            # Check if any subnets is private
+            if SubnetType.PRIVATE in subnet_types:
+                vpc_az_is_pub_memo[f'{vpc_id}-{az}'] = SubnetType.PRIVATE
+            else:
+                if SubnetType.HALF_PUBLIC in subnet_types:
+                    vpc_az_is_pub_memo[f'{vpc_id}-{az}'] = SubnetType.HALF_PUBLIC
+                else:
+                    vpc_az_is_pub_memo[f'{vpc_id}-{az}'] = SubnetType.PUBLIC
+
+            result(account_id,
+                   cw_client,
+                   vpc_id,
+                   az,
+                   endpoint['VpcEndpointId'],
+                   endpoint['ServiceName'],
+                   vpc_az_is_pub_memo[f'{vpc_id}-{az}'])
 
 if __name__ == '__main__':
     region = 'ap-northeast-1'
