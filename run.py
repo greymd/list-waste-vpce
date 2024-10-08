@@ -7,6 +7,7 @@ class SubnetType:
     HALF_PUBLIC = 1
     PRIVATE = 2
 
+nat_gateway_memo = {}
 DEBUG = False
 def debug(msg):
     if DEBUG:
@@ -37,6 +38,19 @@ def result(account_id, cw_client, vpc_id, az, endpoint_id, service_name, subnet_
     for data_point in response['Datapoints']:
         total_bytes_processed += data_point['Sum']
     print(f"\033[91m{account_id}\t{vpc_id}\t{az}\t{subnet_type_str}\t{endpoint_id}\t{service_name}\t{total_bytes_processed}\033[0m", flush=True, file=sys.stdout)
+
+def is_healthy_natgateway(ec2_client, nat_gateway_id):
+    if nat_gateway_id in nat_gateway_memo:
+        return nat_gateway_memo[nat_gateway_id]
+    response = ec2_client.describe_nat_gateways(
+        NatGatewayIds=[nat_gateway_id]
+    )
+    for nat_gateway in response['NatGateways']:
+        if nat_gateway['State'] != 'available':
+            nat_gateway_memo[nat_gateway_id] = False
+            return False
+    nat_gateway_memo[nat_gateway_id] = True
+    return True
 
 # Check if the subnet has any ENIs without public IP address
 def has_private_eni(ec2_client, subnet_id):
@@ -74,7 +88,12 @@ def is_public_subnet(ec2_client, subnet_id):
                         return SubnetType.PUBLIC
                 if 'NatGatewayId' in route:
                     debug(f"Subnet ID: {subnet_id} = PUBLIC")
-                    return SubnetType.PUBLIC
+                    if is_healthy_natgateway(ec2_client, route['NatGatewayId']):
+                        return SubnetType.PUBLIC
+                    else:
+                        print(f"WARNING: NAT Gateway {route['NatGatewayId']} is not healthy", flush=True, file=sys.stderr)
+                        debug(f"Subnet ID: {subnet_id} = HALF_PUBLIC")
+                        return SubnetType.HALF_PUBLIC
     debug(f"Subnet ID: {subnet_id} = PRIVATE")
     return SubnetType.PRIVATE
 
