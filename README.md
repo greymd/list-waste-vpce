@@ -8,11 +8,11 @@ Inspired by this blog post: https://zenn.dev/simpleform_blog/articles/f048edb9ef
 
 ```bash
 $ pip install -r requirements.txt
-$ python list-waste-vpce.py
+$ python list_waste_vpce.py
 ```
 
 Test
 
 ```bash
-$ pytest test_list-waste-vpce.py
+$ pytest test_list_waste_vpce.py
 ```

@@ -1,5 +1,5 @@
 import boto3
-from run import has_private_eni, SubnetType
+from list_waste_vpce import has_private_eni, SubnetType
 region = 'ap-northeast-1'
 
 def test_has_private_eni_true():
