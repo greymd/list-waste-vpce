@@ -1,9 +1,10 @@
 import boto3
 import sys
+import datetime
 
 class EndpointType:
     S3 = 's3'
-    DYNAMODB = 'dynamodb'
+    DYNAMODB = 'ddb'
 
 DEBUG = False
 def debug(msg):
@@ -11,6 +12,7 @@ def debug(msg):
         print(f"[debug] {msg}", flush=True, file=sys.stderr)
 
 # Check if the route_table has a gateway endpoints (S3 and DynamoDB)
+# TODO: Check ECR and Kinesis
 def get_gateways_in_route(client, route_table):
     endpoint_types = []
     endpoints = []
@@ -35,7 +37,9 @@ def get_gateways_in_route(client, route_table):
                 elif service_name.endswith('dynamodb'):
                     debug(f"INFO: Gateway endpoint to DynamoDB exists in route table {route_table['RouteTableId']}")
                     endpoint_types.append(EndpointType.DYNAMODB)
-    return endpoint_types
+    if len(endpoint_types) == 0:
+        endpoint_types.append('empty')
+    return ','.join(endpoint_types)
 
 def get_ineffective_route_tables(client, nat_gateway_id, vpc_id):
     response = client.describe_route_tables(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
@@ -54,24 +58,45 @@ def get_ineffective_route_tables(client, nat_gateway_id, vpc_id):
             if count == 0:
                 continue
             endpoint_types = get_gateways_in_route(client, route_table)
-            if len(endpoint_types) > 0:
-                rtbs[route_table['RouteTableId']] = endpoint_types
+            rtbs[route_table['RouteTableId']] = endpoint_types
     return rtbs
+
+def get_monthly_bytes(client, natgw_id):
+    metrics = ['BytesOutToSource', 'BytesOutToDestination']
+    total_bytes_processed = 0
+    for metric in metrics:
+        response = client.get_metric_statistics(
+             Namespace='AWS/NATGateway',
+             MetricName=metric,
+             Dimensions=[
+                 {'Name': 'NatGatewayId', 'Value': natgw_id}
+             ],
+             Period=3600*24*30,
+             StartTime=(datetime.datetime.now() - datetime.timedelta(days=30)).isoformat(),
+             EndTime=datetime.datetime.now().isoformat(),
+             Statistics=['Sum']
+        )
+        for data_point in response['Datapoints']:
+            total_bytes_processed += data_point['Sum']
+    return total_bytes_processed
 
 def main(region):
     # List all NAT Gateways and check if they are in available state
     ec2 = boto3.client('ec2', region_name=region)
+    cw = boto3.client('cloudwatch', region_name=region)
     response = ec2.describe_nat_gateways()
-    # TODO: Get Statistics of the NAT Gateway
     for nat_gateway in response['NatGateways']:
+        natgw_id = nat_gateway['NatGatewayId']
         if nat_gateway['State'] != 'available':
-            debug(f"WARNING: NAT Gateway {nat_gateway['NatGatewayId']} is in state {nat_gateway['State']}")
+            debug(f"WARNING: NAT Gateway {natgw_id} is in state {nat_gateway['State']}")
             continue
+        total_bytes = get_monthly_bytes(cw, natgw_id)
+        cost_estimate = round(total_bytes * 0.064 / 1024 / 1024 / 1024, 2)
         # Check if the subnets in the VPC that NAT Gateway located
         # have a route to the NAT Gateway
         rtbs = get_ineffective_route_tables(ec2, nat_gateway['NatGatewayId'] ,nat_gateway['VpcId'])
         for rtb, endpoint_types in rtbs.items():
-            print(f"{nat_gateway['NatGatewayId']} {rtb} {endpoint_types}")
+            print(f"{natgw_id}\t{total_bytes}\t{cost_estimate}\t{rtb}\t{endpoint_types}")
     return
 
 if __name__ == '__main__':
